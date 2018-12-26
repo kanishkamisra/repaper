@@ -21,46 +21,56 @@ corresponding pronunciations.
 
 ``` r
 library(tidyverse)
+library(tidytext)
 library(Rcpp)
+
+sourceCpp(here::here("hixon-phonemic-similarity-metrics/rcpp/string_alignment.cpp"))
 
 options(scipen = 99)
 
-read_cmu <- function(url) {
+read_cmu <- function(url, sep = "\\s\\s") {
   result <- read_lines(url) %>%
     keep(!str_detect(., ";;;") & !(. == "")) %>%
     as_tibble() %>%
-    separate(value, into = c("word", "pronunciation"), sep = "\\s\\s")
+    separate(value, into = c("word", "pronunciation"), sep = sep, extra = "merge") %>%
+    filter(!str_detect(pronunciation, "abbrev")) %>%
+    mutate(
+      pronunciation = str_remove_all(pronunciation, "(#|old|foreign|french|name)") %>% str_trim()
+    )
   return(result)
 }
 
-cmu <- read_cmu("http://svn.code.sf.net/p/cmusphinx/code/trunk/cmudict/cmudict-0.7b")
+# cmu <- read_cmu("http://svn.code.sf.net/p/cmusphinx/code/trunk/cmudict/cmudict-0.7b")
+cmu <- read_cmu("https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict.dict", sep = " ")
 
 cmu %>% head()
 ```
 
 <div class="kable-table">
 
-| word                | pronunciation                            |
-| :------------------ | :--------------------------------------- |
-| \!EXCLAMATION-POINT | EH2 K S K L AH0 M EY1 SH AH0 N P OY2 N T |
-| "CLOSE-QUOTE        | K L OW1 Z K W OW1 T                      |
-| "DOUBLE-QUOTE       | D AH1 B AH0 L K W OW1 T                  |
-| "END-OF-QUOTE       | EH1 N D AH0 V K W OW1 T                  |
-| "END-QUOTE          | EH1 N D K W OW1 T                        |
-| "IN-QUOTES          | IH1 N K W OW1 T S                        |
+| word    | pronunciation   |
+| :------ | :-------------- |
+| ’bout   | B AW1 T         |
+| ’cause  | K AH0 Z         |
+| ’course | K AO1 R S       |
+| ’cuse   | K Y UW1 Z       |
+| ’em     | AH0 M           |
+| ’frisco | F R IH1 S K OW0 |
 
 </div>
 
-The authors propose to modify the CMU Dict as follows: 1. Remove
-non-alphabetic characters 2. Remove Phonetic stress weights like: `AA0`,
-`AH1` -\> `AA, AH` 3. Remove acronym expansions
+The authors propose to modify the CMU Dict as follows:
 
-In order to remove non-alphabetic characters, we filter out all words
-that have a non-alphabetic character as the first character of the
-string or the first 70 entries (from careful analysis). For acronyms,
-CMU has provided a separate file that contains the acronym mappings, we
-use the mapping to remove all pronunciations for acronyms. Removing
-stress weights is a rather trivial task.
+1.  Remove non-alphabetic characters
+2.  Remove Phonetic stress weights like: `AA0`, `AH1` -\> `AA, AH`
+3.  Remove acronym
+expansions
+
+<!-- In order to remove non-alphabetic characters, we filter out all words that have a non-alphabetic character as the first character of the string or the first 70 entries (from careful analysis).  -->
+
+For acronyms, CMU has provided a separate file that contains the acronym
+mappings, we use the mapping to remove all pronunciations for acronyms.
+Removing stress weights is a rather trivial task.
 
 ``` r
 ## 2slow4me
@@ -70,66 +80,130 @@ check_word <- function(word) {
   return(result)
 }
 
-cmu_acronyms <- read_cmu("https://raw.githubusercontent.com/Alexir/CMUdict/master/acronym-0.7b")
+cmu_acronyms <- read_cmu("https://raw.githubusercontent.com/Alexir/CMUdict/master/acronym-0.7b") %>% mutate(word = str_to_lower(word))
 
 fdict <- cmu %>%
-  slice(-(1:70)) %>%
+  # slice(-(1:70)) %>%
   anti_join(cmu_acronyms) %>%
   mutate(
-    pronunciation = str_remove_all(pronunciation, "\\d")
+    pronunciation = str_remove_all(pronunciation, "\\d"),
+    word = str_remove_all(word, "[^a-z'\\d\\(\\)]")
   ) %>%
   distinct()
 ```
 
 **Mis-match \#1:** The original filtered dictionary, *FDICT* contained
-129,559 entries as opposed to our 133,319 entry *FDICT* in our case. Our
+129,559 entries as opposed to our 134,396 entry *FDICT* in our case. Our
 best guess is that this is due to the version mismatch between the two
 CMU dicts.
+
+encoding of pronunciation strings
+
+``` r
+phonemes <- fdict %>% 
+  select(pronunciation) %>% 
+  distinct() %>% 
+  unnest_tokens(phonemes, pronunciation, to_lower = F) %>% 
+  distinct() %>%
+  pull(phonemes)
+
+encodings <- as.list(c(letters, LETTERS)[1:length(phonemes)])
+names(encodings) <- phonemes
+
+encode_cmu <- function(string) {
+  #F R IH S K OW
+  result <- str_split(string, " ", simplify = T) %>% 
+    map_chr(~encodings[[.x]]) %>%
+    glue::glue_collapse() %>%
+    as.character()
+  return(result)
+}
+
+fdict_encoded <- fdict %>%
+  mutate(pronunciation = map_chr(pronunciation, encode_cmu))
+
+fdict_encoded %>% sample_n(10)
+```
+
+<div class="kable-table">
+
+| word       | pronunciation |
+| :--------- | :------------ |
+| baley      | asuy          |
+| fowler’s   | mbuxf         |
+| chell      | Jqu           |
+| terribly   | cqheauy       |
+| hydrox     | BGthgdi       |
+| vincelette | Anrinuqc      |
+| gerstner’s | pxicrxf       |
+| instone    | nricor        |
+| straws     | ichgf         |
+| junior’s   | Hkrjxf        |
+
+</div>
 
 Next, we find the words with one or more alternate pronunciations
 present in our *FDICT*.
 
 ``` r
-alternates <- c(
-  fdict$word %>% 
-  keep(str_detect(., "\\(*.?\\)")) %>%
-  map_chr(str_remove, pattern = "\\(*.?\\)"), 
-  fdict$word %>% 
-    keep(str_detect(., "\\(*.?\\)"))
-)
-
-fdict %>% 
-  filter(word %in% alternates) %>%
-  tail()
+alternates <- fdict_encoded %>%
+  mutate(
+    alternates = str_extract(word, "\\(\\d\\)"),
+    word = str_remove(word, "\\(\\d\\)")
+  ) %>%
+  group_by(word) %>%
+  nest() %>%
+  mutate(len = map_int(data, nrow)) %>%
+  filter(len > 1) %>%
+  select(-len) %>%
+  mutate(
+    data = map(data, function(x) {
+      x %>% select(-alternates) %>% distinct()
+    })
+  )
 ```
-
-<div class="kable-table">
-
-| word          | pronunciation        |
-| :------------ | :------------------- |
-| ZYSK          | Z IH S K             |
-| ZYSK(1)       | Z AY S K             |
-| ZYUGANOV      | Z Y UW G AA N AA V   |
-| ZYUGANOV(1)   | Z UW G AA N AA V     |
-| ZYUGANOV’S    | Z Y UW G AA N AA V Z |
-| ZYUGANOV’S(1) | Z UW G AA N AA V Z   |
-
-</div>
 
 ## String Alignment using the Modified Needleman-Wunsch Algorithm
 
 To-do: Present motivation, computation, example.
 
 ``` r
-sourceCpp("rcpp/string_alignment.cpp")
+# string_dist("split", "plate")
+# string_align("split", "plate")
 
-string_dist("split", "plate")
+phoneme_substitutions <- function(pronunciation) {
+  result <- combn(pronunciation, m = 2) %>%
+    t() %>%
+    as_tibble() %>%
+    mutate(aligned = map2(V1, V2, string_align)) %>%
+    pull(aligned) %>% 
+    map(function(x){
+      str_split(x, "") %>% 
+        bind_cols %>% 
+        filter(V1 != V2)
+    }) %>% 
+    bind_rows() %>% 
+    rename(phoneme1 = "V1", phoneme2 = "V2")
+  
+  return(result)
+}
+
+test <- alternates %>%
+  filter(word == "tuesday") %>%
+  pull(data) %>%
+  .[[1]] %>%
+  pull(pronunciation)
+
+phoneme_substitutions(test)
 ```
 
-    ## [1] 4
+<div class="kable-table">
 
-``` r
-string_align("split", "plate")
-```
+| phoneme1 | phoneme2 |
+| :------- | :------- |
+| y        | s        |
+| \*       | j        |
+| y        | s        |
+| \*       | j        |
 
-    ## [1] "split*" "*plate"
+</div>
