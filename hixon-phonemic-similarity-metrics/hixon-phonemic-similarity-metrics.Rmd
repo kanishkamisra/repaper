@@ -92,13 +92,16 @@ phonemes <- fdict %>%
   distinct() %>%
   pull(phonemes)
 
-encodings <- as.list(c(letters, LETTERS)[1:length(phonemes)])
-names(encodings) <- phonemes
+p2e <- as.list(c(letters, LETTERS)[1:length(phonemes)])
+names(p2e) <- phonemes
+
+e2p <- as.list(phonemes)
+names(e2p) <- c(letters, LETTERS)[1:length(phonemes)]
 
 encode_cmu <- function(string) {
   #F R IH S K OW
   result <- str_split(string, " ", simplify = T) %>% 
-    map_chr(~encodings[[.x]]) %>%
+    map_chr(~p2e[[.x]]) %>%
     glue::glue_collapse() %>%
     as.character()
   return(result)
@@ -127,7 +130,10 @@ alternates <- fdict_encoded %>%
     data = map(data, function(x) {
       x %>% select(-alternates) %>% distinct()
     })
-  )
+  ) %>%
+  mutate(len = map_int(data, nrow)) %>%
+  filter(len > 1) %>%
+  select(-len) 
 ```
 
 
@@ -139,7 +145,7 @@ To-do: Present motivation, computation, example.
 # string_dist("split", "plate")
 # string_align("split", "plate")
 
-phoneme_substitutions <- function(pronunciation) {
+tidy_align <- function(pronunciation) {
   result <- combn(pronunciation, m = 2) %>%
     t() %>%
     as_tibble() %>%
@@ -147,8 +153,7 @@ phoneme_substitutions <- function(pronunciation) {
     pull(aligned) %>% 
     map(function(x){
       str_split(x, "") %>% 
-        bind_cols %>% 
-        filter(V1 != V2)
+        bind_cols()
     }) %>% 
     bind_rows() %>% 
     rename(phoneme1 = "V1", phoneme2 = "V2")
@@ -162,6 +167,45 @@ test <- alternates %>%
   .[[1]] %>%
   pull(pronunciation)
 
-phoneme_substitutions(test)
+tidy_align(test)
+
+substitutions <- alternates %>%
+  mutate(
+    substitutions = map(data, function(x) {
+      return(tidy_align(x$pronunciation))
+    })
+  ) %>%
+  select(-data) %>%
+  unnest() %>%
+  mutate(
+    phoneme1 = map_chr(phoneme1, function(x) ifelse(x != "*", e2p[[x]], x)),
+    phoneme2 = map_chr(phoneme2, function(x) ifelse(x != "*", e2p[[x]], x))
+  )
+
+aligned_phonemes <- tibble(
+  phoneme = c(
+    substitutions %>%
+      pull(phoneme1),
+    substitutions %>%
+      pull(phoneme2)
+  )
+) %>%
+  add_tally() %>%
+  count(phoneme, n) %>%
+  transmute(
+    phoneme, 
+    freq = nn/n
+  )
+
+substitutions %>%
+  select(phoneme1, phoneme2) %>%
+  add_count() %>%
+  count(phoneme1, phoneme2, n) %>%
+  transmute(phoneme1, phoneme2, freq_substitute = nn/n) %>%
+  inner_join(aligned_phonemes %>% rename(freq1 = "freq", phoneme1 = "phoneme")) %>%
+  inner_join(aligned_phonemes %>% rename(freq2 = "freq", phoneme2 = "phoneme")) %>%
+  mutate(score = log(freq_substitute*4/(freq1 + freq2))) %>%
+  select(phoneme1, phoneme2, score)
 ```
 
+Possible that I am doing something wrong..
